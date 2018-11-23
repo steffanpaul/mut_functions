@@ -159,6 +159,40 @@ def double_mutate_ungapped(X, ungapped_index):
 
     return mutations_matrix
 
+#double mutate function used in som_average_ug_split for large alignments
+def double_mutate_ungapped_split(X, ug_r, ug_c):
+
+    num_summary, seqlen, _, dims = X.shape
+    idxlen_r = len(ug_r)
+    idxlen_c = ug_c
+
+    mutations_matrix = np.zeros((idxlen_r,idxlen_c, dims*dims, seqlen,1,dims))
+
+    for i1,position1 in enumerate(ug_r):
+
+        for i2,position2 in enumerate(ug_c):
+
+            for nuc1 in range(dims):
+
+                for nuc2 in range(dims):
+
+                    mut_seq = np.copy(X)
+                    mut_seq[0, position1, 0, :] = np.zeros(dims)
+                    mut_seq[0, position1, 0, nuc1] = 1.0
+                    mut_seq[0, position2, 0, :] = np.zeros(dims)
+                    mut_seq[0, position2, 0, nuc2] = 1.0
+
+                    mutations_matrix[i1, i2, (nuc1*dims)+nuc2, :] = mut_seq
+
+    return mutations_matrix
+
+#passing in the whole list and return a list of the list split up
+def split_list(long, numsplit=4):
+    splitidx = [(len(long)//numsplit)*i for i in range(numsplit)]
+    splitidx.append(len(long))
+    splitup = [long[f:f+1] for f in splitidx[:-1]]
+    return (splitup, splitup)
+
 
 
 '--------------------------------------------------------------------------------------------------------------------------------'
@@ -555,6 +589,85 @@ def som_average_ungapped(Xdict, ungapped_index, savepath, nntrainer, sess, progr
 
 
     return (mean_mut2_scores)
+
+
+#Mofidied Generic that allows a single seq SoM to be broken up
+def som_average_ungapped_split(Xdict, ungapped_index, savepath, nntrainer, sess, split=4, progress='on', save=True, layer='output',
+                         normalize=False):
+
+    num_summary, seqlen, _, dims = Xdict.shape
+
+    starttime = time.time()
+
+    idxlen = len(ungapped_index)
+
+    #initialize the full array to hold all the scores before averaging
+    sum_mut2_scores = np.zeros((num_summary, idxlen, idxlen, dims, dims))
+
+    for ii in range(num_summary):
+        if progress == 'on':
+            print (ii)
+
+        epoch_starttime = time.time()
+
+        #extract sequence
+        X = np.expand_dims(Xdict[ii], axis=0)
+        #Get WT score
+        WT = {'inputs': X, 'targets': np.ones((X.shape[0], 1))}
+        WT_score = nntrainer.get_activations(sess, WT, layer=layer)[0]
+
+        #initialize temp array per sequence
+        temp_scores = np.zeros((idxlen, idxlen, dims, dims))
+        #split up the idxlen into managebale bits
+        idxs_r, idxs_c = split_list(ungapped_index, numsplit=split)
+
+        for r in idxs_r:
+            for c in idxs_c:
+                X_mutsecorder = double_mutate_ungapped_split(X, r, c)
+                #reshape the 6D tensor into a 4D tensor that the model can test
+                X_mutsecorder_reshape = np.reshape(X_mutsecorder, (len(r)*len(c)*dims*dims, seqlen, 1, dims))
+                mutations = {'inputs': X_mutsecorder_reshape, 'targets': np.ones((X_mutsecorder_reshape.shape[0], 1))}
+                #Get output activations for the mutations
+                mut2_scores= nntrainer.get_activations(sess, mutations, layer=layer)
+
+                #logodds regime:
+                if normalize == 'logodds':
+                    minscore = np.min(mut2_scores)
+                    #mut2_scores = np.log(np.clip(mut2_scores, a_min=0., a_max=1e7) + 1e-7) - np.log(WT_score+1e-7)
+                    mut2_scores = np.log(mut2_scores - minscore + 1e-7) - np.log(WT_score-minscore+1e-7)
+                #Reshape and add back to temp array
+                temp_scores[r[0]:r[-1]+1, c[0]:c[-1]+1, :, :] = mut2_scores.reshape(len(r),len(c),dims,dims)
+
+        #Add the temp to the full scores
+        sum_mut2_scores[ii] = temp_scores
+
+        epoch_endtime = time.time()
+
+        if progress == 'on':
+
+            print ('Epoch duration =' + sectotime(epoch_endtime -epoch_starttime))
+            print ('Cumulative duration =' + sectotime(epoch_endtime - starttime))
+            print ()
+
+        if progress == 'short':
+            if ii%100 == 0:
+                print (ii)
+                print ('Epoch duration =' + sectotime((epoch_endtime -epoch_starttime)*100))
+                print ('Cumulative duration =' + sectotime(epoch_endtime - starttime))
+                print ()
+
+    print ('----------------Summing complete----------------')
+
+    mean_mut2_scores = np.nanmean(sum_mut2_scores, axis=0)
+
+    # Save the summed array for future use
+    if save == True:
+        np.save(savepath, mean_mut2_scores)
+        print ('Saving scores to ' + savepath)
+
+
+    return (mean_mut2_scores)
+
 
 
 #Implement log odds difference
@@ -983,8 +1096,8 @@ def bpug(ugidx, bpidx, SQ):
 
 ''' UTILITIES '''
 
-rnadict = {'A':0, 'C':1, 'G':2, 'U':3, 'a':0, 'c':1, 'g':2, 'u':3, '-':4, '.':4}#, 'N':4, 'n':4, 'R':4}
-dnadict = {'A':0, 'C':1, 'G':2, 'T':3, 'a':0, 'c':1, 'g':2, 't':3, '-':4, '.':4}#, 'N':4, 'n':4, 'R':4}
+rnadict = {'A':0, 'C':1, 'G':2, 'U':3, 'a':0, 'c':1, 'g':2, 'u':3, '-':4, '.':4}
+dnadict = {'A':0, 'C':1, 'G':2, 'T':3, 'a':0, 'c':1, 'g':2, 't':3, '-':4, '.':4}
 
 def seq_onehot(sequences, alphabet, gaps=True):
     if alphabet == 'rna':
